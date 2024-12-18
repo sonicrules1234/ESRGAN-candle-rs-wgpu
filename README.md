@@ -1,4 +1,4 @@
-# ESRGAN-candle-rs
+# ESRGAN-candle-rs-wgpu
 
 ESRGAN implemented in rust with candle.
 
