@@ -196,6 +196,7 @@ pub struct RRDBNet {
     conv_hr: nn::Conv2d,
     conv_last: nn::Conv2d,
     lrelu: nn::Activation,
+    scale: usize,
 }
 
 impl RRDBNet {
@@ -214,7 +215,15 @@ impl RRDBNet {
             dilation: 1,
             groups: 1,
         };
-        let conv_first = nn::conv2d(num_in_ch, num_feat, 3, config, vb.pp("conv_first"));
+        let new_num_in_ch: usize;
+        if scale == 2 {
+            new_num_in_ch = num_in_ch * 4;
+        } else if scale == 1 {
+            new_num_in_ch = num_in_ch * 16;
+        } else {
+            new_num_in_ch = num_in_ch;
+        }
+        let conv_first = nn::conv2d(new_num_in_ch, num_feat, 3, config, vb.pp("conv_first"));
         let mut body = seq();
         for i in 0..num_blocks {
             body.add(RRDB::load(
@@ -238,13 +247,22 @@ impl RRDBNet {
             conv_hr: conv_hr.unwrap(),
             conv_last: conv_last.unwrap(),
             lrelu,
+            scale,
         })
     }
 }
 
 impl nn::Module for RRDBNet {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let mut feat = self.conv_first.forward(xs)?;
+        let new_xs: Tensor;
+        if self.scale == 2 {
+            new_xs = nn::ops::pixel_unshuffle(xs, 2)?;
+        } else if self.scale == 1 {
+            new_xs = nn::ops::pixel_unshuffle(xs, 2)?;
+        } else {
+            new_xs = xs.to_owned();
+        }
+        let mut feat = self.conv_first.forward(&new_xs)?;
         let body_feat = self.conv_body.forward(&self.body.forward(&feat)?)?;
         feat = (feat + body_feat)?;
         feat = self

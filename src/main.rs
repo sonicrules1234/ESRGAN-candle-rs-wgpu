@@ -46,7 +46,7 @@ struct Args {
 
     /// Device to run the model on
     /// -1 for CPU, 0 for GPU 0, 1 for GPU 1, etc.
-    #[arg(short, long, default_value = "-1")]
+    #[arg(short, long, default_value = "0")]
     device: i32,
 
     /// Architecture revision (old or new). Dependent on the model used.
@@ -82,7 +82,7 @@ fn img2tensor(img: DynamicImage, device: &Device, half: bool) -> Tensor {
     let height: usize = img.height() as usize;
     let width: usize = img.width() as usize;
     let data = img.to_rgb8().into_raw();
-    let tensor = Tensor::from_vec(data, (height, width, 3), device)
+    let tensor = Tensor::from_vec(data, (height, width, 3), &Device::Cpu)
         .unwrap()
         .permute((2, 0, 1))
         .unwrap();
@@ -92,6 +92,8 @@ fn img2tensor(img: DynamicImage, device: &Device, half: bool) -> Tensor {
         .to_dtype(if half { DType::F16 } else { DType::F32 })
         .unwrap()
         / 255.)
+        .unwrap()
+        .to_device(device)
         .unwrap();
     return image_t;
 }
@@ -103,10 +105,11 @@ fn tensor2img(tensor: Tensor) -> RgbImage {
         .permute((1, 2, 0))
         .unwrap()
         .detach()
+        .to_device(&cpu)
         .unwrap()
         .to_dtype(DType::U8)
-        .unwrap()
-        .to_device(&cpu)
+        //.unwrap()
+        //.to_device(&cpu)
         .unwrap();
 
     let dims = result.dims();
@@ -146,7 +149,10 @@ fn main() {
 
     let device = match args.device {
         -1 => Device::Cpu,
-        _ => Device::new_cuda(args.device as usize).unwrap(),
+        _ => {
+            let config = candle_core::WgpuDeviceConfig::default();
+            Device::new_wgpu_sync_config(0, config).unwrap()
+        }
     };
 
     let path_extension = Path::new(&args.model)
@@ -157,7 +163,10 @@ fn main() {
 
     let state_dict = match path_extension {
         "safetensors" => load(&args.model, &device).unwrap(),
-        "pth" => pickle::read_all(&args.model).unwrap().into_iter().collect(),
+        "pth" => pickle::read_all_with_key(&args.model, Some("params_ema"))
+            .unwrap()
+            .into_iter()
+            .collect(),
         _ => panic!("Invalid model file extension"),
     };
 
@@ -223,9 +232,27 @@ fn main() {
     }
 
     let files = std::fs::read_dir(images_dir).unwrap();
+    let out_filenames: Vec<String> = std::fs::read_dir(out_dir.clone())
+        .unwrap()
+        .into_iter()
+        .map(|x| {
+            let file_path = x.unwrap().path();
+            let fn_option = file_path.file_name();
+            fn_option
+                .unwrap()
+                .to_os_string()
+                .to_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
     let now = Instant::now();
-    files.into_iter().for_each(|file| {
-        let file = file.unwrap();
+    for file_part in files {
+        let file = file_part.unwrap();
+        let file_name = file.file_name().into_string().unwrap();
+        if out_filenames.contains(&file_name) {
+            continue;
+        }
         let path = file.path();
         let img = image::open(path).unwrap();
 
@@ -234,6 +261,6 @@ fn main() {
         let out_path = format!("{}/{}", out_dir, file.file_name().into_string().unwrap());
         out_img.save(out_path).unwrap();
         println!("Saved {}", file.file_name().into_string().unwrap());
-    });
+    }
     println!("Time taken: {:?}", now.elapsed());
 }

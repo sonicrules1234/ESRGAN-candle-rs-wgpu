@@ -1,17 +1,12 @@
 [package]
-name = "esrgan-candle-rs"
+name = "esrgan-candle-rs-wgpu"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.3.1", features = [
-    "cuda",
-    "cudnn",
-] }
-candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.3.1", features = [
-    "cuda",
-] }
+candle-core = { git = "https://github.com/KimHenrikOtte/candle.git", branch = "wgpu_cleanup", features = [ "wgpu" ] }
+candle-nn = { git = "https://github.com/KimHenrikOtte/candle.git", branch = "wgpu_cleanup", features= [ "wgpu" ] }
 clap = { version = "4.4.8", features = ["derive"] }
 image = "0.24.7"
