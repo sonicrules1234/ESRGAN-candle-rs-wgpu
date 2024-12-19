@@ -1,5 +1,5 @@
 [package]
-name = "esrgan-candle-rs-wgpu"
+name = "esrgan-candle-rs-video"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,4 +9,6 @@ edition = "2021"
 candle-core = { git = "https://github.com/KimHenrikOtte/candle.git", branch = "wgpu_cleanup", features = [ "wgpu" ] }
 candle-nn = { git = "https://github.com/KimHenrikOtte/candle.git", branch = "wgpu_cleanup", features= [ "wgpu" ] }
 clap = { version = "4.4.8", features = ["derive"] }
+ffmpeg-frame-grabber = { git = "https://github.com/sonicrules1234/rust-ffmpeg-frame-grabber.git" }
 image = "0.24.7"
+tokio = { version = "1.42.0", features = ["full"] }

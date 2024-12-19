@@ -1,7 +1,11 @@
-use std::time::Instant;
-
 use candle_core::{pickle, DType, Device, Tensor};
 use candle_nn::{Module, VarBuilder};
+use ffmpeg_frame_grabber::{FFMpegVideo, FFMpegVideoOptions};
+use std::io::{Cursor, Read, Write};
+use std::process::Stdio;
+use std::time::Instant;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 mod new_arch;
 mod old_arch;
 use candle_core::safetensors::load;
@@ -36,11 +40,11 @@ struct Args {
     #[arg(short, long)]
     model: String,
 
-    /// Folder path containing images to upscale
+    /// Path to input video file
     #[arg(short, long)]
     input: String,
 
-    /// Folder path to save upscaled images
+    /// Path to output video file
     #[arg(short, long)]
     output: String,
 
@@ -130,21 +134,21 @@ enum ModelVariant {
 fn process(model: &ModelVariant, img: DynamicImage, device: &Device, half: bool) -> RgbImage {
     let img_t = img2tensor(img, &device, half);
 
-    let now = Instant::now();
+    //let now = Instant::now();
     let result = match model {
         ModelVariant::Old(model) => model.forward(&img_t).unwrap(),
         ModelVariant::New(model) => model.forward(&img_t).unwrap(),
         ModelVariant::Compact(model) => model.forward(&img_t).unwrap(),
     };
-    println!("Model took {:?}", now.elapsed());
+    //println!("Model took {:?}", now.elapsed());
 
     let result = (result.squeeze(0).unwrap().clamp(0., 1.).unwrap() * 255.).unwrap();
 
     let out_img = tensor2img(result);
     return out_img;
 }
-
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Args = Args::parse();
 
     let device = match args.device {
@@ -224,43 +228,80 @@ fn main() {
         ),
     };
 
-    let images_dir = args.input;
-    let out_dir = args.output;
+    let video_path = args.input;
+    let out_video_path = args.output;
 
-    if !std::path::Path::new(&out_dir).exists() {
-        std::fs::create_dir(&out_dir).unwrap();
-    }
-
-    let files = std::fs::read_dir(images_dir).unwrap();
-    let out_filenames: Vec<String> = std::fs::read_dir(out_dir.clone())
-        .unwrap()
-        .into_iter()
-        .map(|x| {
-            let file_path = x.unwrap().path();
-            let fn_option = file_path.file_name();
-            fn_option
-                .unwrap()
-                .to_os_string()
-                .to_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
     let now = Instant::now();
-    for file_part in files {
-        let file = file_part.unwrap();
-        let file_name = file.file_name().into_string().unwrap();
-        if out_filenames.contains(&file_name) {
-            continue;
+    let mut fc_cmd = Command::new("ffprobe");
+    let mut fc_args: Vec<&str> =
+        "-v error -select_streams v:0 -of csv=p=0 -count_frames -show_entries stream=nb_read_frames"
+            .split(" ")
+            .collect();
+    fc_args.push(&video_path);
+    let fc_command_output = fc_cmd.args(fc_args.clone()).output().await.unwrap();
+    let mut fc_out_string = String::new();
+    fc_command_output
+        .stdout
+        .as_slice()
+        .read_to_string(&mut fc_out_string)
+        .unwrap();
+    let frame_count: usize = fc_out_string.trim().to_string().parse().unwrap();
+    let mut fr_cmd = Command::new("ffprobe");
+    let mut fr_args: Vec<&str> =
+        "-v 0 -of csv=p=0 -select_streams v:0 -show_entries stream=r_frame_rate"
+            .split(" ")
+            .collect();
+    fr_args.push(&video_path);
+    let fr_command_output = fr_cmd.args(fr_args.clone()).output().await.unwrap();
+    let mut fr_out_string = String::new();
+    fr_command_output
+        .stdout
+        .as_slice()
+        .read_to_string(&mut fr_out_string)
+        .unwrap();
+    let frame_rate = fr_out_string.trim().to_string();
+    let mut ffmpeg_cmd = Command::new("ffmpeg");
+    let ffmpeg_args_string = format!("-r {frame_rate} -f image2pipe -i pipe: -vn -i {video_path} -c:a copy -c:v libx264rgb -crf 0 -qp 0 -preset veryslow -r {frame_rate} {out_video_path}");
+    let mut ffmpeg_spawn = ffmpeg_cmd
+        .args(ffmpeg_args_string.split(" ").collect::<Vec<&str>>())
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut ffmpeg_stdin = ffmpeg_spawn.stdin.take().unwrap();
+    //let stdin_bufwriter = BufWriter::new(ffmpeg_stdin);
+    let video = FFMpegVideo::open(Path::new(&video_path), FFMpegVideoOptions::default()).unwrap();
+    let mut count = 0;
+    for frame in video {
+        count += 1;
+        if count > frame_count {
+            break;
         }
-        let path = file.path();
-        let img = image::open(path).unwrap();
-
-        let out_img = process(&model, img, &device, args.half);
-
-        let out_path = format!("{}/{}", out_dir, file.file_name().into_string().unwrap());
-        out_img.save(out_path).unwrap();
-        println!("Saved {}", file.file_name().into_string().unwrap());
+        if let Ok(img) = frame {
+            // do something with the image data here ...
+            //let img = image::load_from_memory_with_format(&png_img_data, image::ImageFormat::Png)
+            //.unwrap();
+            let out_img = process(
+                &model,
+                DynamicImage::ImageRgb8(img.image),
+                &device,
+                args.half,
+            );
+            let mut image_vec: Vec<u8> = Vec::new();
+            out_img
+                .write_to(&mut Cursor::new(&mut image_vec), image::ImageFormat::Png)
+                .unwrap();
+            ffmpeg_stdin
+                .write_all(&mut image_vec.as_slice())
+                .await
+                .unwrap();
+        } else {
+            break;
+        }
     }
+    drop(ffmpeg_stdin);
+    ffmpeg_spawn.wait().await.unwrap();
     println!("Time taken: {:?}", now.elapsed());
 }
